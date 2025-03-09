@@ -1,3 +1,0 @@
-Tôi muốn làm 1 ứng dụng mà tôi sẽ nhập yêu cầu, nó sẽ mở browser và làm theo yêu cầu với yêu cầu đó.
-Ý tưởng là sẽ dùng LLM để phân tích và dùng puppeteer để thực hiện.
-Khi xác định các element thì phải hiển thị các element đó trên browser bằng cách tô border các màu khác nhau
