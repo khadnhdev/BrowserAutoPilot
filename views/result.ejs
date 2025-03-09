@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kết quả Tự động hóa</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="container mt-5">
+    <div class="row justify-content-center">
+      <div class="col-md-10">
+        <div class="card shadow">
+          <div class="card-header bg-success text-white">
+            <h2 class="text-center">Kết quả Tự động hóa</h2>
+          </div>
+          <div class="card-body">
+            <div class="mb-4">
+              <h4>Yêu cầu của bạn:</h4>
+              <div class="alert alert-info">
+                <%= request %>
+              </div>
+            </div>
+            
+            <div class="mb-4">
+              <h4>Các bước đã thực hiện:</h4>
+              <div class="accordion" id="stepsAccordion">
+                <% steps.forEach(function(step, index) { %>
+                <div class="accordion-item">
+                  <h2 class="accordion-header">
+                    <button 
+                      class="accordion-button <%= step.result === 'Thành công' ? '' : 'bg-warning text-dark' %>" 
+                      type="button" 
+                      data-bs-toggle="collapse" 
+                      data-bs-target="#collapse<%= index %>" 
+                      aria-expanded="<%= index === 0 ? 'true' : 'false' %>" 
+                      aria-controls="collapse<%= index %>"
+                    >
+                      <span class="fw-bold">Bước <%= index + 1 %>:</span> <%= step.description %>
+                      <% if(step.result === "Thành công") { %>
+                        <span class="badge bg-success ms-2">✓</span>
+                      <% } else { %>
+                        <span class="badge bg-danger ms-2">✗</span>
+                      <% } %>
+                    </button>
+                  </h2>
+                  <div id="collapse<%= index %>" class="accordion-collapse collapse <%= index === 0 ? 'show' : '' %>" data-bs-parent="#stepsAccordion">
+                    <div class="accordion-body">
+                      <div class="row">
+                        <div class="col-md-8">
+                          <p><strong>Hành động:</strong> <%= step.action %></p>
+                          <% if (step.selector) { %>
+                            <p><strong>Selector:</strong> <code><%= step.selector %></code></p>
+                          <% } %>
+                          <% if (step.value) { %>
+                            <p><strong>Giá trị:</strong> <%= step.value %></p>
+                          <% } %>
+                          <p><strong>Kết quả:</strong> <%= step.result %></p>
+                          <% if (step.message) { %>
+                            <p><strong>Chi tiết:</strong> <%= step.message %></p>
+                          <% } %>
+                        </div>
+                        <% if (step.screenshotPath) { %>
+                        <div class="col-md-4">
+                          <img src="<%= step.screenshotPath %>" alt="Ảnh chụp của bước <%= index + 1 %>" class="img-fluid thumbnail">
+                        </div>
+                        <% } %>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <% }); %>
+              </div>
+            </div>
+            
+            <% if (screenshotPath) { %>
+              <div class="mb-4">
+                <h4>Ảnh chụp màn hình cuối cùng:</h4>
+                <div class="text-center">
+                  <img src="<%= screenshotPath %>" alt="Kết quả tự động hóa" class="img-fluid border rounded">
+                </div>
+              </div>
+            <% } %>
+            
+            <div class="d-grid">
+              <a href="/" class="btn btn-primary">Quay lại</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html> 
