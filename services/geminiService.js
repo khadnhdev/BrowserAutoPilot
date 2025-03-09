@@ -206,8 +206,126 @@ async function analyzeHTMLStructure(html, currentState, errorContext) {
   }
 }
 
+// Phương thức mới để quyết định bước tiếp theo với HTML đầy đủ
+async function decideNextStepWithHTML(request, currentState, previousSteps = [], pageStructure = null, fullHTML = '') {
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    
+    // Tạo log của các bước trước đó
+    const previousStepsLog = previousSteps.map((step, index) => 
+      `Bước ${index + 1}: ${step.description} - Kết quả: ${step.result || 'Thành công'}`
+    ).join('\n');
+
+    // Chuẩn bị thông tin về cấu trúc trang
+    let pageStructureInfo = '';
+    if (pageStructure) {
+      pageStructureInfo = `
+Cấu trúc trang web hiện tại:
+
+Forms (${pageStructure.forms.length}):
+${pageStructure.forms.map(form => `- Form ${form.id ? `id="${form.id}"` : `#${form.index}`} với ${form.fields.length} trường
+  ${form.fields.map(field => `  + ${field.type} ${field.name ? `name="${field.name}"` : ''} ${field.placeholder ? `placeholder="${field.placeholder}"` : ''} ${field.isRequired ? '(bắt buộc)' : ''} selector="${field.selector}"`).join('\n  ')}`).join('\n')}
+
+Buttons (${pageStructure.buttons.length}):
+${pageStructure.buttons.map(btn => `- Button "${btn.text || 'Không có text'}" ${btn.id ? `id="${btn.id}"` : ''} selector="${btn.selector}"`).join('\n')}
+
+Inputs ngoài form (${pageStructure.inputs.length}):
+${pageStructure.inputs.map(input => `- ${input.type} ${input.name ? `name="${input.name}"` : ''} ${input.placeholder ? `placeholder="${input.placeholder}"` : ''} selector="${input.selector}"`).join('\n')}
+
+Links (${pageStructure.links.length > 10 ? '10 links đầu tiên' : `${pageStructure.links.length} links`}):
+${pageStructure.links.slice(0, 10).map(link => `- Link "${link.text || 'Không có text'}" href="${link.href}" selector="${link.selector}"`).join('\n')}
+
+${pageStructure.searchBoxes && pageStructure.searchBoxes.length > 0 ? `
+Search boxes (${pageStructure.searchBoxes.length}):
+${pageStructure.searchBoxes.map(search => `- ${search.type} ${search.placeholder ? `placeholder="${search.placeholder}"` : ''} selector="${search.selector}"`).join('\n')}
+` : ''}
+
+Nội dung chính:
+${pageStructure.mainContent.slice(0, 5).map(content => `- ${content.tag}: "${content.text.substring(0, 100)}${content.text.length > 100 ? '...' : ''}"`).join('\n')}
+`;
+    }
+
+    // Chuẩn bị trích đoạn HTML để phân tích
+    const htmlInfo = `
+HTML hiện tại (trích đoạn đầu và các phần quan trọng):
+\`\`\`html
+${fullHTML.substring(0, 7000)}
+...
+\`\`\`
+`;
+
+    const prompt = `
+    Yêu cầu tự động hóa: "${request}"
+    
+    Trạng thái hiện tại: 
+    - URL: ${currentState.url}
+    - Tiêu đề: ${currentState.title}
+    
+    Các bước đã thực hiện:
+    ${previousStepsLog}
+    
+    ${pageStructureInfo}
+    
+    ${htmlInfo}
+    
+    Dựa vào thông tin trên và HTML hiện tại, hãy quyết định bước tiếp theo để hoàn thành yêu cầu.
+    Sử dụng các selector CSS hoặc XPath chính xác từ cấu trúc trang để tương tác với các phần tử.
+    
+    Các loại hành động có thể thực hiện:
+    - type: Nhập text vào một trường
+    - click: Nhấp vào một phần tử
+    - select: Chọn một option trong dropdown
+    - wait: Chờ một khoảng thời gian (mili giây)
+    - waitForSelector: Chờ cho đến khi một phần tử xuất hiện
+    - navigate: Điều hướng đến một URL mới
+    - pressKey: Nhấn phím (Enter, Tab, Escape,...)
+    - clickText: Tìm và nhấp vào phần tử chứa text
+    
+    Nếu yêu cầu đã hoàn thành, hãy trả về "completed": true.
+    
+    Trả về kết quả dưới dạng JSON:
+    {
+      "completed": false,
+      "nextStep": {
+        "action": "type/click/select/wait/...",
+        "selector": "CSS selector hoặc XPath của phần tử (nếu cần)",
+        "value": "Giá trị cần nhập (nếu cần)",
+        "description": "Mô tả hành động này"
+      }
+    }
+    
+    HOẶC nếu đã hoàn thành:
+    
+    {
+      "completed": true,
+      "summary": "Tóm tắt các hành động đã thực hiện"
+    }
+    
+    Chỉ trả về JSON, không có giải thích thêm.
+    `;
+    
+    console.log('Đang yêu cầu Gemini quyết định bước tiếp theo với HTML đầy đủ...');
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+    console.log('Phản hồi từ Gemini:', text);
+    
+    try {
+      const jsonStr = text.replace(/```json|```/g, '').trim();
+      return JSON.parse(jsonStr);
+    } catch (parseError) {
+      console.error('Lỗi phân tích JSON:', parseError);
+      throw new Error('Không thể phân tích phản hồi từ Gemini');
+    }
+  } catch (error) {
+    console.error('Lỗi khi gọi Gemini API:', error);
+    throw error;
+  }
+}
+
 module.exports = {
   analyzeRequest,
   decideNextStep,
-  analyzeHTMLStructure
+  analyzeHTMLStructure,
+  decideNextStepWithHTML
 }; 

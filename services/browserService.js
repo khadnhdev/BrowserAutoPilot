@@ -52,10 +52,42 @@ async function executeInstructions(initialInstructions, userRequest) {
         content: await page.content()
       };
       
+      // Luôn kiểm tra CAPTCHA trước khi thực hiện bất kỳ hành động nào
+      const captchaResult = await handleCaptchaIfPresent(page);
+      if (!captchaResult) {
+        console.log("Có vấn đề với CAPTCHA, tiếp tục thử thực hiện hành động...");
+      }
+      
+      // Lấy HTML hiện tại và gửi cho Gemini để phân tích trước khi thực hiện hành động
+      const htmlBeforeAction = await page.content();
+      const currentUrlBeforeAction = await page.url();
+      const titleBeforeAction = await page.title();
+      
+      // Gửi HTML cho Gemini để phân tích trước khi thực hiện
+      console.log('Đang gửi HTML cho Gemini để phân tích trước khi thực hiện hành động...');
+      const htmlAnalysisBeforeAction = await geminiService.analyzeHTMLStructure(
+        htmlBeforeAction, 
+        {
+          url: currentUrlBeforeAction,
+          title: titleBeforeAction
+        }, 
+        `Chuẩn bị thực hiện hành động: "${currentStep.action}" trên phần tử "${currentStep.selector || ''}"`
+      );
+      
+      console.log('Kết quả phân tích HTML trước hành động:', htmlAnalysisBeforeAction);
+      
+      // Nếu Gemini gợi ý selector tốt hơn, sử dụng nó
+      if (htmlAnalysisBeforeAction.recommendedSelector && 
+          currentStep.selector && 
+          htmlAnalysisBeforeAction.recommendedSelector !== currentStep.selector) {
+        console.log(`Gemini đề xuất selector tốt hơn: ${htmlAnalysisBeforeAction.recommendedSelector} thay vì ${currentStep.selector}`);
+        currentStep.selector = htmlAnalysisBeforeAction.recommendedSelector;
+      }
+      
       // Thực hiện hành động
       let actionResult = { success: false, message: "" };
       try {
-        // Thử thực hiện hành động trước khi tô màu
+        // Thử thực hiện hành động 
         await executeAction(page, currentStep);
         
         // Kiểm tra xem có captcha xuất hiện sau hành động không
@@ -74,29 +106,57 @@ async function executeInstructions(initialInstructions, userRequest) {
         console.error(`Lỗi khi thực hiện hành động: ${actionError.message}`);
         actionResult.message = actionError.message;
         
-        // Nếu không tìm thấy phần tử, thử tìm bằng text và tô màu phần tử tìm được
-        if (currentStep.value && (actionError.message.includes("No element found") || actionError.message.includes("Cannot read properties"))) {
-          console.log(`Thử tìm phần tử bằng text: ${currentStep.value}`);
-          const found = await findElementByTextAndHighlight(page, currentStep.value, "#FF0000");
-          if (found && found.selector) {
-            console.log(`Đã tìm thấy phần tử bằng text, sử dụng selector mới: ${found.selector}`);
-            currentStep.selector = found.selector;
-            // Thử lại hành động với selector mới
-            try {
-              await executeAction(page, currentStep);
-              actionResult.success = true;
-              actionResult.message = "Thành công sau khi tìm phần tử bằng text";
-            } catch (retryError) {
-              console.error('Vẫn không thể thực hiện hành động với selector mới:', retryError);
+        // Lấy HTML hiện tại sau khi thực hiện thất bại
+        const htmlAfterFailedAction = await page.content();
+        const stateAfterFailed = {
+          url: await page.url(),
+          title: await page.title()
+        };
+        
+        // Gửi HTML cho Gemini để phân tích lỗi
+        console.log('Đang gửi HTML cho Gemini để phân tích lỗi...');
+        const htmlAnalysisAfterFail = await geminiService.analyzeHTMLStructure(
+          htmlAfterFailedAction, 
+          stateAfterFailed, 
+          `Gặp lỗi khi thực hiện "${currentStep.action}" trên phần tử "${currentStep.selector || ''}": ${actionError.message}`
+        );
+        
+        console.log('Kết quả phân tích lỗi:', htmlAnalysisAfterFail);
+        
+        // Nếu có selector thay thế được đề xuất, thử lại với selector mới
+        if (htmlAnalysisAfterFail.recommendedSelector) {
+          console.log(`Thử lại với selector được đề xuất: ${htmlAnalysisAfterFail.recommendedSelector}`);
+          currentStep.selector = htmlAnalysisAfterFail.recommendedSelector;
+          try {
+            await executeAction(page, currentStep);
+            actionResult.success = true;
+            actionResult.message = "Thành công sau khi sử dụng selector được đề xuất bởi Gemini";
+          } catch (retryError) {
+            console.error("Vẫn không thành công với selector được đề xuất");
+            
+            // Thử JavaScript fallback nếu có
+            if (htmlAnalysisAfterFail.javascriptFallback) {
+              console.log("Thử sử dụng JavaScript fallback được đề xuất");
+              try {
+                await page.evaluate((jsCode, value) => {
+                  eval(jsCode.replace('VALUE_TO_REPLACE', value));
+                }, htmlAnalysisAfterFail.javascriptFallback, currentStep.value || '');
+                
+                actionResult.success = true;
+                actionResult.message = "Thành công sau khi sử dụng JavaScript fallback được đề xuất bởi Gemini";
+              } catch (jsError) {
+                console.error("JavaScript fallback cũng thất bại:", jsError);
+              }
             }
           }
         }
-        
-        // Tiếp tục thử các phương pháp thay thế khác...
       }
       
       // Chờ trang web phản hồi
       await page.waitForTimeout(2000);
+      
+      // Kiểm tra lại CAPTCHA sau hành động
+      await handleCaptchaIfPresent(page);
       
       // Xác minh hành động đã thành công
       const verificationResult = await verifyAction(page, currentStep, beforeState);
@@ -109,7 +169,6 @@ async function executeInstructions(initialInstructions, userRequest) {
         actionResult.message = `Không thể xác minh đầy đủ: ${verificationResult.message}`;
       } else {
         console.error(`❌ Xác minh hành động thất bại: ${verificationResult.message}`);
-        // Nếu đã thất bại và xác minh cũng thất bại thì giữ nguyên thông báo lỗi
       }
       
       // Chụp ảnh màn hình cho bước hiện tại
@@ -131,22 +190,27 @@ async function executeInstructions(initialInstructions, userRequest) {
         screenshotPath: `/screenshots/steps/${path.basename(stepScreenshotPath)}`
       });
       
-      // Lấy trạng thái hiện tại của trang và cấu trúc HTML
+      // Lấy HTML hiện tại sau khi thực hiện
+      const htmlAfterAction = await page.content();
+      
+      // Lấy trạng thái hiện tại của trang
       const currentState = {
         url: await page.url(),
-        title: await page.title()
+        title: await page.title(),
+        htmlContent: htmlAfterAction.substring(0, 50000) // Lấy 50k ký tự đầu tiên của HTML
       };
       
       // Phân tích cấu trúc HTML và các phần tử tương tác
       const pageStructure = await analyzePageStructure(page);
       
-      // Quyết định bước tiếp theo
-      console.log('Đang quyết định bước tiếp theo...');
-      const decision = await geminiService.decideNextStep(
+      // Quyết định bước tiếp theo với HTML đầy đủ
+      console.log('Đang gửi HTML hiện tại và quyết định bước tiếp theo...');
+      const decision = await geminiService.decideNextStepWithHTML(
         userRequest, 
         currentState, 
         executedSteps,
-        pageStructure
+        pageStructure,
+        htmlAfterAction
       );
       
       if (decision.completed) {
@@ -155,88 +219,27 @@ async function executeInstructions(initialInstructions, userRequest) {
       } else {
         currentStep = decision.nextStep;
       }
-      
-      if (!actionResult.success) {
-        console.log("Gặp khó khăn khi tương tác với trang, yêu cầu Gemini phân tích HTML...");
-        const htmlContent = await page.content();
-        const htmlAnalysis = await geminiService.analyzeHTMLStructure(
-          htmlContent, 
-          currentState, 
-          `Không thể tương tác với phần tử "${currentStep.selector}" để thực hiện "${currentStep.action}"`
-        );
-        
-        console.log("Phân tích HTML từ Gemini:", htmlAnalysis);
-        
-        if (htmlAnalysis.recommendedSelector) {
-          console.log(`Thử lại với selector được đề xuất: ${htmlAnalysis.recommendedSelector}`);
-          currentStep.selector = htmlAnalysis.recommendedSelector;
-          try {
-            await executeAction(page, currentStep);
-            actionResult.success = true;
-            actionResult.message = "Thành công sau khi sử dụng selector được đề xuất bởi Gemini";
-          } catch (retryError) {
-            console.error("Vẫn không thành công với selector được đề xuất");
-            
-            // Nếu có JavaScript fallback, thử sử dụng nó
-            if (htmlAnalysis.javascriptFallback) {
-              console.log("Thử sử dụng JavaScript fallback được đề xuất");
-              try {
-                await page.evaluate((jsCode, value) => {
-                  // Thực thi code JavaScript được đề xuất
-                  eval(jsCode.replace('VALUE_TO_REPLACE', value));
-                }, htmlAnalysis.javascriptFallback, currentStep.value || '');
-                
-                actionResult.success = true;
-                actionResult.message = "Thành công sau khi sử dụng JavaScript fallback được đề xuất bởi Gemini";
-              } catch (jsError) {
-                console.error("JavaScript fallback cũng thất bại:", jsError);
-              }
-            }
-          }
-        }
-      }
     }
     
-    // Chụp màn hình kết quả
-    console.log('Đang chụp màn hình kết quả...');
-    const screenshotsDir = path.join(__dirname, '../public/screenshots');
-    
-    if (!fs.existsSync(screenshotsDir)) {
-      fs.mkdirSync(screenshotsDir, { recursive: true });
+    // Chụp ảnh màn hình cuối cùng
+    const screenshotDir = path.join(__dirname, '../public/screenshots');
+    if (!fs.existsSync(screenshotDir)) {
+      fs.mkdirSync(screenshotDir, { recursive: true });
     }
+    const finalScreenshotPath = path.join(screenshotDir, `final_${Date.now()}.png`);
+    await page.screenshot({ path: finalScreenshotPath, fullPage: true });
     
-    const timestamp = new Date().getTime();
-    const screenshotPath = `/screenshots/result_${timestamp}.png`;
-    const fullPath = path.join(__dirname, '../public', screenshotPath);
-    
-    await page.screenshot({ path: fullPath, fullPage: true });
-    console.log(`Đã lưu ảnh chụp màn hình tại: ${fullPath}`);
-    
-    // Đợi người dùng xem kết quả (15 giây) trước khi đóng
-    console.log('Chờ 15 giây trước khi đóng trình duyệt...');
-    await page.waitForTimeout(15000);
-    
+    console.log(`Đã hoàn thành tất cả ${executedSteps.length} bước.`);
     return {
-      success: true,
       steps: executedSteps,
-      screenshotPath
+      screenshotPath: `/screenshots/${path.basename(finalScreenshotPath)}`
     };
   } catch (error) {
     console.error('Lỗi khi thực hiện tự động hóa:', error);
-    try {
-      const timestamp = new Date().getTime();
-      const errorScreenshotPath = path.join(__dirname, '../public/screenshots', `error_${timestamp}.png`);
-      await page.screenshot({ path: errorScreenshotPath, fullPage: true });
-      console.log(`Đã lưu ảnh chụp màn hình lỗi tại: ${errorScreenshotPath}`);
-    } catch (screenshotError) {
-      console.error('Không thể chụp màn hình lỗi:', screenshotError);
-    }
-    
     throw error;
   } finally {
-    // Đóng trình duyệt
-    console.log('Đóng trình duyệt');
     await browser.close();
+    console.log('Đã đóng trình duyệt.');
   }
 }
 
@@ -763,71 +766,145 @@ async function executeAction(page, step) {
   }
 }
 
-// Hàm mới để xử lý captcha
+// Hàm xử lý captcha cải tiến
 async function handleCaptchaIfPresent(page) {
-  // Kiểm tra xem có captcha trên trang không
-  const captchaDetected = await detectCaptcha(page);
-  
-  if (captchaDetected) {
-    console.log('⚠️ Phát hiện CAPTCHA! Chờ 10 giây để xem có được xử lý tự động không...');
+  try {
+    // Kiểm tra xem có captcha trên trang không
+    const captchaDetected = await detectCaptcha(page);
     
-    // Chụp ảnh captcha để xem xét
-    const captchaScreenshotPath = path.join(__dirname, '../public/screenshots', `captcha_${Date.now()}.png`);
-    await page.screenshot({ path: captchaScreenshotPath });
-    console.log(`Đã chụp ảnh captcha tại: ${captchaScreenshotPath}`);
-    
-    // Chờ 10 giây ban đầu như yêu cầu
-    await page.waitForTimeout(10000);
-    
-    // Kiểm tra lại xem captcha còn không
-    let captchaStillPresent = await detectCaptcha(page);
-    let waitAttempts = 1;
-    const maxWaitAttempts = 12; // Chờ tối đa 2 phút (12 lần x 10 giây)
-    
-    while (captchaStillPresent && waitAttempts < maxWaitAttempts) {
-      console.log(`Captcha vẫn hiện diện sau ${waitAttempts * 10} giây. Tiếp tục chờ...`);
-      await page.waitForTimeout(10000); // Chờ thêm 10 giây
-      captchaStillPresent = await detectCaptcha(page);
-      waitAttempts++;
+    if (captchaDetected) {
+      console.log('⚠️ Phát hiện CAPTCHA!');
+      
+      // Chụp ảnh captcha để xem xét
+      const captchaScreenshotPath = path.join(__dirname, '../public/screenshots', `captcha_${Date.now()}.png`);
+      await page.screenshot({ path: captchaScreenshotPath, fullPage: true });
+      console.log(`Đã chụp ảnh captcha tại: ${captchaScreenshotPath}`);
+      
+      // Thông báo cho người dùng
+      console.log('Đang chờ người dùng hoặc các giải pháp tự động xử lý captcha...');
+      
+      // Chờ 10 giây ban đầu như yêu cầu
+      await page.waitForTimeout(10000);
+      
+      // Kiểm tra lại xem captcha còn không
+      let captchaStillPresent = await detectCaptcha(page);
+      let waitAttempts = 1;
+      const maxWaitAttempts = 12; // Chờ tối đa 2 phút (12 lần x 10 giây)
+      
+      while (captchaStillPresent && waitAttempts < maxWaitAttempts) {
+        console.log(`Captcha vẫn hiện diện sau ${waitAttempts * 10} giây. Tiếp tục chờ...`);
+        await page.waitForTimeout(10000); // Chờ thêm 10 giây
+        captchaStillPresent = await detectCaptcha(page);
+        waitAttempts++;
+      }
+      
+      // Chụp ảnh sau khi xử lý để so sánh
+      const afterCaptchaPath = path.join(__dirname, '../public/screenshots', `after_captcha_${Date.now()}.png`);
+      await page.screenshot({ path: afterCaptchaPath, fullPage: true });
+      
+      if (!captchaStillPresent) {
+        console.log('✅ Captcha đã được xử lý thành công, tiếp tục thực hiện.');
+        return true;
+      } else {
+        console.log('⚠️ Đã chờ quá thời gian tối đa nhưng captcha vẫn chưa được xử lý.');
+        // Có thể thêm xử lý đặc biệt ở đây, ví dụ thông báo cho người dùng
+        return false;
+      }
     }
     
-    if (!captchaStillPresent) {
-      console.log('✅ Captcha đã được xử lý thành công, tiếp tục thực hiện.');
-    } else {
-      console.log('⚠️ Đã chờ quá thời gian tối đa nhưng captcha vẫn chưa được xử lý.');
-      // Có thể thêm xử lý đặc biệt ở đây, ví dụ thông báo cho người dùng
-    }
+    return true; // Không có captcha
+  } catch (error) {
+    console.error('Lỗi khi xử lý captcha:', error);
+    return false; // Giả định rằng có vấn đề với captcha nếu có lỗi
   }
 }
 
-// Hàm phát hiện captcha trên trang
+// Hàm phát hiện captcha trên trang cải tiến
 async function detectCaptcha(page) {
   return await page.evaluate(() => {
-    // Tìm các dấu hiệu phổ biến của captcha
-    const captchaIndicators = [
-      // Google reCAPTCHA
-      document.querySelector('iframe[src*="recaptcha"]'),
-      document.querySelector('.g-recaptcha'),
-      document.querySelector('[data-sitekey]'),
-      
-      // hCaptcha
-      document.querySelector('iframe[src*="hcaptcha"]'),
-      document.querySelector('.h-captcha'),
-      
-      // Text phổ biến
-      Array.from(document.querySelectorAll('*')).some(el => 
-        el.textContent && el.textContent.toLowerCase().includes('captcha')
-      ),
-      
-      // Các phần tử có ID/class liên quan đến captcha
-      document.querySelector('#captcha'),
-      document.querySelector('.captcha'),
-      document.querySelector('[id*="captcha" i]'),
-      document.querySelector('[class*="captcha" i]')
-    ];
+    // Kiểm tra Google reCAPTCHA
+    const hasRecaptchaIframe = !!document.querySelector('iframe[src*="recaptcha"]');
+    const hasRecaptchaDiv = !!document.querySelector('.g-recaptcha');
+    const hasSiteKey = !!document.querySelector('[data-sitekey]');
     
-    // Nếu bất kỳ dấu hiệu nào tồn tại, có thể có captcha
-    return captchaIndicators.some(indicator => indicator);
+    // Kiểm tra hCaptcha
+    const hasHcaptchaIframe = !!document.querySelector('iframe[src*="hcaptcha"]');
+    const hasHcaptchaDiv = !!document.querySelector('.h-captcha');
+    
+    // Kiểm tra các yếu tố dựa trên ID/class cụ thể
+    const hasCaptchaId = !!document.querySelector('#captcha');
+    const hasCaptchaClass = !!document.querySelector('.captcha');
+    const hasIdWithCaptcha = !!document.querySelector('[id*="captcha" i]');
+    const hasClassWithCaptcha = !!document.querySelector('[class*="captcha" i]');
+    
+    // Phân tích text để phát hiện captcha - cần thận trọng để tránh false positives
+    let hasTextMentioningCaptcha = false;
+    
+    // Chỉ kiểm tra text trong các phần tử hiển thị và có kích thước hợp lý
+    const visibleElements = Array.from(document.querySelectorAll('h1, h2, h3, h4, p, label, div.alert, .popup, .modal, .dialog, [role="dialog"]'))
+      .filter(el => {
+        // Kiểm tra xem phần tử có hiển thị không
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && 
+               rect.height > 0 && 
+               style.display !== 'none' && 
+               style.visibility !== 'hidden' && 
+               style.opacity !== '0';
+      });
+    
+    // Tìm kiếm từ "captcha" trong text của các phần tử hiển thị
+    for (const el of visibleElements) {
+      const text = el.innerText || el.textContent;
+      if (text && text.toLowerCase().includes('captcha')) {
+        hasTextMentioningCaptcha = true;
+        break;
+      }
+    }
+    
+    // Kiểm tra các hình ảnh captcha
+    const hasCaptchaImage = !!document.querySelector('img[src*="captcha" i]');
+    
+    // Kiểm tra thẻ canvas (thường được sử dụng trong captcha tùy chỉnh)
+    const hasCanvas = document.querySelectorAll('canvas').length > 0 && (hasTextMentioningCaptcha || hasClassWithCaptcha);
+    
+    // Kiểm tra các yếu tố phổ biến khác
+    const hasVerifyText = Array.from(visibleElements).some(el => {
+      const text = el.innerText || el.textContent;
+      return text && (
+        text.toLowerCase().includes('i\'m not a robot') ||
+        text.toLowerCase().includes('tôi không phải là robot') ||
+        text.toLowerCase().includes('xác minh bạn là người') ||
+        text.toLowerCase().includes('verify you are human')
+      );
+    });
+    
+    // Ghi log chi tiết để debug
+    console.log('Kết quả phát hiện captcha:', {
+      recaptcha: hasRecaptchaIframe || hasRecaptchaDiv || hasSiteKey,
+      hcaptcha: hasHcaptchaIframe || hasHcaptchaDiv,
+      captchaIdClass: hasCaptchaId || hasCaptchaClass || hasIdWithCaptcha || hasClassWithCaptcha,
+      captchaText: hasTextMentioningCaptcha,
+      captchaImage: hasCaptchaImage,
+      canvas: hasCanvas,
+      verifyText: hasVerifyText
+    });
+    
+    // Combine all checks
+    return (
+      // Google reCAPTCHA
+      hasRecaptchaIframe || hasRecaptchaDiv || hasSiteKey ||
+      // hCaptcha
+      hasHcaptchaIframe || hasHcaptchaDiv ||
+      // ID/Class specific
+      hasCaptchaId || hasCaptchaClass ||
+      // More specific combinations (to reduce false positives)
+      (hasTextMentioningCaptcha && (hasIdWithCaptcha || hasClassWithCaptcha || hasCaptchaImage)) ||
+      // Tìm thấy canvas kết hợp với text hoặc class liên quan 
+      hasCanvas ||
+      // Phát hiện text "I'm not a robot" và tương tự
+      hasVerifyText
+    );
   });
 }
 
